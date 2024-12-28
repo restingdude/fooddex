@@ -1,0 +1,291 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // === Helper Functions ===
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return request.auth.uid == userId;
+    }
+
+    function isValidUsername(username) {
+      return username is string 
+        && username.matches('^[0-9]{10}$')  // Exactly 10 digits
+        && username.size() == 10;
+    }
+
+// === User Management ===
+match /users/{userId} {
+  allow read: if request.auth != null;
+  
+  // Allow creation with required fields
+  allow create: if request.auth != null 
+    && request.auth.uid == userId
+    && isValidUsername(request.resource.data.username)
+    && request.resource.data.email == request.auth.token.email
+    && request.resource.data.createdAt is timestamp;
+  
+  // Allow updates for nickname field
+  allow update: if request.auth != null 
+    && request.auth.uid == userId
+    && request.resource.data.username == resource.data.username
+    && request.resource.data.email == resource.data.email
+    && request.resource.data.createdAt == resource.data.createdAt
+    && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['nickname']) || 
+        (request.resource.data.nickname == null || request.resource.data.nickname is string));
+  
+  allow delete: if false;  // Prevent profile deletion
+
+  // Add rules for collectiontags subcollection
+  match /collectiontags/{tagId} {
+    // Allow any authenticated user to read, but only owner can write
+    allow read: if request.auth != null;
+    
+    // Allow create with required fields
+    allow create: if request.auth != null 
+      && request.auth.uid == userId
+      && request.resource.data.keys().hasAll(['tagName', 'restaurantId', 'createdAt', 'lastStarredAt'])
+      && request.resource.data.tagName is string
+      && request.resource.data.restaurantId is string
+      && request.resource.data.createdAt is timestamp
+      && request.resource.data.lastStarredAt is timestamp;
+    
+    // Allow update of lastStarredAt field only
+    allow update: if request.auth != null 
+      && request.auth.uid == userId
+      && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastStarredAt'])
+      && request.resource.data.lastStarredAt is timestamp;
+    
+    // Allow delete if user owns the tag
+    allow delete: if request.auth != null && request.auth.uid == userId;
+  }
+}
+
+// === User Food Index ===
+match /userFoodDex/{userId} {
+  allow read, write: if request.auth != null && request.auth.uid == userId;
+  
+  match /restaurant/{restaurantId} {
+    allow read, write: if request.auth != null && request.auth.uid == userId;
+    
+    match /entries/{entryId} {
+      allow read: if request.auth != null && (
+        request.auth.uid == userId || 
+        resource.data.isPublic == true
+      );
+      
+      allow create: if request.auth != null && 
+        request.auth.uid == userId &&
+        request.resource.data.keys().hasAll(['createdAt', 'userId']);
+      
+      allow update: if request.auth != null && 
+        (
+          // Allow owner to update all fields
+          (request.auth.uid == userId && 
+           request.resource.data.userId == resource.data.userId) ||
+          // Allow viewCount increment for public entries
+          (
+            resource.data.isPublic == true &&
+            // Simple check for media field update only
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['media'])
+          )
+        );
+      
+      allow delete: if request.auth != null && request.auth.uid == userId;
+      
+      match /media/{mediaId} {
+        allow read: if request.auth != null && (
+          request.auth.uid == userId || 
+          get(/databases/$(database)/documents/userFoodDex/$(userId)/restaurant/$(restaurantId)/entries/$(entryId)).data.isPublic == true
+        );
+        allow write: if request.auth != null && request.auth.uid == userId;
+      }
+      
+      match /videos/{videoId} {
+        allow read: if request.auth != null && (
+          request.auth.uid == userId || 
+          get(/databases/$(database)/documents/userFoodDex/$(userId)/restaurant/$(restaurantId)/entries/$(entryId)).data.isPublic == true
+        );
+        allow write: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+  }
+}
+  
+    // === Restaurant Management ===
+    match /restaurants/{restaurantId} {
+      allow read: if true;
+      allow delete: if request.auth != null;
+      
+      // Allow create with all required fields
+      allow create: if request.auth != null 
+        && request.resource.data.keys().hasAll(['name', 'location', 'createdAt'])
+        && request.resource.data.name is string
+        && request.resource.data.location is map
+        && request.resource.data.location.latitude is number
+        && request.resource.data.location.longitude is number
+        && request.resource.data.createdAt is timestamp;
+      
+      // Allow updates with basic validation
+      allow update: if request.auth != null
+        && (
+          // Only validate fields that are being updated
+          (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['location']) || 
+            (request.resource.data.location is map 
+             && request.resource.data.location.latitude is number 
+             && request.resource.data.location.longitude is number))
+        );
+    }
+
+// === Tag Management ===
+match /tags/{restaurantId} {
+  // Active Tags
+  match /activeTags/{tagId} {
+    allow read: if true;
+    allow create: if request.auth != null 
+      && request.resource.data.keys().hasAll(['name', 'createdAt', 'updatedAt', 'createdBy', 'stars', 'totalStars'])
+      && request.resource.data.createdAt is timestamp
+      && request.resource.data.updatedAt is timestamp;
+    allow update: if request.auth != null 
+      && request.resource.data.updatedAt is timestamp
+      && request.resource.data.updatedAt >= resource.data.updatedAt;
+    allow delete: if request.auth != null;
+  }
+}
+
+    // User Tags
+    match /userFoodDex/{userId}/tags/{tagId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      
+      allow create: if request.auth != null &&
+                     request.auth.uid == userId &&
+                     request.resource.data.keys().hasAll([
+                       'tagName',
+                       'restaurantId',
+                       'restaurantName',
+                       'discoveredAt',
+                       'isConfirmed'
+                     ]);
+      
+      allow update: if request.auth != null &&
+                     request.auth.uid == userId &&
+                     request.resource.data.diff(resource.data).affectedKeys()
+                       .hasOnly(['lastStarredAt', 'isConfirmed']);
+      
+      allow delete: if false;
+    }
+
+// === Card System ===
+match /users/{userId} {
+  // Allow reading user profiles
+  allow read: if request.auth != null;
+  
+  // Custom Cards
+  match /customCards/{cardId} {
+    allow read: if request.auth != null;
+    
+    allow create: if request.auth != null &&
+                   request.auth.uid == userId &&
+                   request.resource.data.keys().hasAll([
+                     'title',
+                     'icon',
+                     'color',
+                     'count',
+                     'createdAt',
+                     'username',
+                     'nickname',
+                     'followers'
+                   ]) &&
+                   request.resource.data.title is string &&
+                   request.resource.data.title.size() > 0 &&
+                   request.resource.data.count == 0 &&
+                   request.resource.data.followers == 0 &&
+                   request.resource.data.username == get(/databases/$(database)/documents/users/$(userId)).data.username;
+
+    allow update: if request.auth != null && 
+                   (
+                     // Allow owner to update non-sensitive fields
+                     (request.auth.uid == userId && 
+                      (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['count', 'followers']) || 
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['nickname']))) ||
+                     // Allow follower count updates from anyone
+                     (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['followers']))
+                   );
+
+    allow delete: if request.auth != null && request.auth.uid == userId;
+
+    match /entries/{entryId} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if request.auth != null && request.auth.uid == userId;
+    }
+
+    match /followers/{followerId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && request.auth.uid == followerId;
+      allow delete: if request.auth != null && request.auth.uid == followerId;
+    }
+  }
+
+  // Followed Collections within users collection
+  match /followedCollections/{followId} {
+    allow read: if request.auth != null && request.auth.uid == userId;
+    allow create, delete: if request.auth != null && request.auth.uid == userId;
+  }
+}
+    // === Collection Group Queries ===
+    match /{path=**}/activeTags/{tagId} {
+      allow read: if true;
+    }
+
+    match /{path=**}/entries/{entryId} {
+      allow read: if 
+        // Allow if the entry is public
+        resource.data.isPublic == true ||
+        // OR if the user owns the entry
+        (request.auth != null && 
+         resource.data.userId == request.auth.uid);
+    }
+
+    // === Unconfirmed Restaurants ===
+    match /unconfirmedRestaurants/{userId}/restaurants/{restaurantId} {
+      // Allow read if:
+      // 1. User is authenticated AND
+      // 2. Either they are an admin OR it's their own submission
+      allow read: if request.auth != null && (
+        request.auth.token.admin == true ||
+        request.auth.uid == userId
+      );
+
+      // Allow create if authenticated and creating in their own collection
+      allow create: if request.auth != null 
+        && request.auth.uid == userId
+        && request.resource.data.keys().hasAll(['name', 'area', 'location', 'addedBy', 'createdAt', 'status'])
+        && request.resource.data.addedBy == request.auth.uid
+        && request.resource.data.status == 'unconfirmed';
+
+      // Allow update if user is admin
+      allow update: if request.auth != null 
+        && request.auth.token.admin == true;
+
+      // Allow delete if:
+      // 1. User is authenticated AND
+      // 2. Either they are an admin OR it's their own submission
+      allow delete: if request.auth != null && (
+        request.auth.token.admin == true ||
+        request.auth.uid == userId
+      );
+    }
+
+    // Collection group query rule for restaurants subcollection
+    match /{path=**}/restaurants/{restaurantId} {
+      allow read: if request.auth != null && (
+        // Allow admins to read all restaurants
+        request.auth.token.admin == true ||
+        // Allow users to read their own restaurants
+        (path.size() >= 2 && path[0] == 'unconfirmedRestaurants' && path[1] == request.auth.uid)
+      );
+    }
+  }
+}
